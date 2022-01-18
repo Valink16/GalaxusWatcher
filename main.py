@@ -17,9 +17,10 @@ driver = webdriver.Chrome(service=s, options=o)
 
 watcher = util.Watcher(driver)
 
-urls = watcher.search("GTX", {"category": ["graphics cards"]})
-# urls = watcher.search("phone", {"brand": ["samsung", "huawei"], "storage capacity": ["128 gb", "256 gb", "512 gb"]})
+# urls = watcher.search("GTX", {"category": ["graphics cards"]})
+# urls = watcher.search("phone", {"brand": ["samsung", "huawei"], "storage capacity": ["128 gb", "256 gb", "512 gb"], "price": (100, 500)})
 # urls = watcher.search("phone", {"brand": ["samsung", "huawei"], "storage capacity": ["32 gb"]})
+urls = watcher.search("RTX 3050", {"category": ["graphics cards"]})
 
 for url in urls:
 	print(url)
