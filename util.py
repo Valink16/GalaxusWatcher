@@ -1,5 +1,16 @@
+from email import message
+from gc import collect
+from re import T
 from time import sleep
 from typing import List, Tuple
+from http.client import HTTPSConnection
+import urllib
+import threading
+import datetime
+import json
+
+import flask
+
 from selenium.webdriver.remote.webelement import WebElement
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -7,6 +18,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
+
+import bs4 as bs
 
 WAIT_TIMEOUT = 5
 
@@ -22,11 +35,15 @@ class Watcher:
 		self.language = "en/"
 		self.driver = driver
 
-	def search(self, term: str, filters: dict, take=20) -> List[str]:
+	def search(self, term: str, filters: dict, take=20) -> List[dict]:
 		"""
 		Searches for a product name, with filtering and sorting applied
 		Returns list of URLs of matches
 		"""
+		self.driver.execute_script('alert("Focus window")')
+		
+		self.driver.switch_to.alert.accept()
+
 		self.driver.get(self.base_url + self.language + "search?q={}".format(term))
 
 		try:
@@ -36,29 +53,63 @@ class Watcher:
 
 		self.driver.get(self.driver.current_url + "&take={}".format(take))
 
+		# print("Waiting for products to load...")
 		# Wait till the products are loaded
 		WebDriverWait(self.driver, 10) \
 			.until(
 				EC.presence_of_element_located((
 					By.CSS_SELECTOR, 
-					".panelProduct > a"
+					".panelProduct"
 				))
 			)
 			
-		return list(map(
-			lambda product: product.get_attribute("href"),
-			self.driver.find_elements(By.CSS_SELECTOR, ".panelProduct > a")
-		))
+		def mapf(product):
+			# print(bs.BeautifulSoup(product.get_attribute("innerHTML")).prettify())
+			# print(product.get_attribute("outerHTML"))
+			ac = ActionChains(self.driver)
+			ac.move_to_element(product.find_element(By.CSS_SELECTOR, "div > div > span"))
+			ac.perform()
+			
+			popup = WebDriverWait(self.driver, WAIT_TIMEOUT) \
+				.until(EC.visibility_of_element_located((
+					By.CSS_SELECTOR,
+					"div[data-test=\"popover\"]"
+				)))
 
-	def apply_filters(self, filters: dict):
-		"""
-		Applies the given filters to the current page, panics if no filters available, all values should be lower case
-		Filters should be a dict containing string keys with the filter name and lists containing the wanted values for the given filter
-		the price key must be associated to a tuple of integers
-		"""
+			delivery_options = {}
+			
+
+			options_names = popup.find_elements(By.XPATH, "./div[2]/h3")
+			option_texts = popup.find_elements(By.XPATH, "./div[2]/span/div")
+			# print("Options names: {}".format(len(options_names)))
+			# print("Options values: {}".format(len(option_texts)))
+
+			if len(option_texts) < len(options_names):
+				option_texts.append(None)
+
+			for option_name, option_text in zip(options_names, option_texts):
+				text = option_text.text if option_text else "OK"
+				delivery_options[option_name.text.lower()] = text.lower().replace('\n', ' ')
+			
+			# print(delivery_options)
+
+			popup.find_element(By.CSS_SELECTOR, "button").click()
+			
+			a = product.find_element(By.XPATH, "./a")
+			return {
+				"name": a.get_attribute("aria-label"),
+				"href": a.get_attribute("href"),
+				"price": product.find_element(By.CSS_SELECTOR, "span > strong").text,
+				"availability": delivery_options
+			}
+		return list(map(mapf, self.driver.find_elements(By.CSS_SELECTOR, ".panelProduct")))
+
+	def collect_filter_buttons(self):
 		# Expand all filters
+		expanded_filters = False
 		try:
-			filters_button = WebDriverWait(self.driver, WAIT_TIMEOUT) \
+			
+			filters_button = WebDriverWait(self.driver, 1) \
 				.until(
 					EC.presence_of_element_located((
 						By.XPATH, 
@@ -66,49 +117,75 @@ class Watcher:
 					))
 				)
 			filters_button.click()
+			expanded_filters = True
 		except TimeoutException:
 			pass
+		
+		nav = WebDriverWait(self.driver, WAIT_TIMEOUT) \
+			.until(
+				EC.visibility_of_element_located((
+					By.CSS_SELECTOR, 
+					"div[role=\"navigation\"]"
+				))
+			)
+		
+		# collect all filters
+		if expanded_filters:
+			filter_buttons = nav.find_elements(By.CSS_SELECTOR, "div > div > button > div > div:nth-child(1)")[:-1] # Exclude last, which is the "Fewer filters" button
+		else:
+			filter_buttons = nav.find_elements(By.CSS_SELECTOR, "div > div > button > div > div:nth-child(1)")
+		
+		filter_keys = list(map(lambda elem: elem.text.lower(), filter_buttons))
+
+		return (filter_buttons, filter_keys)
+
+	def apply_filters(self, filters: dict):
+		"""
+		Applies the given filters to the current page, panics if no filters available, all values should be lower case
+		Filters should be a dict containing string keys with the filter name and lists containing the wanted values for the given filter
+		the price key is in format: "%d-%d"
+		"""
+
+		filter_buttons, filter_keys = self.collect_filter_buttons()
+		if "price" in filters:
+			try:
+				i = filter_keys.index("price")
+				filter_buttons[i].click()
+
+				# Wait until the selection menu opens
+				WebDriverWait(self.driver, WAIT_TIMEOUT) \
+					.until(
+						EC.visibility_of_element_located((
+							By.CSS_SELECTOR,
+							"input[inputmode=\"decimal\"]"
+						))
+					)
+
+				min, max = self.driver.find_elements(By.CSS_SELECTOR, "input[inputmode=\"decimal\"]")
+
+				min.send_keys(Keys.CONTROL + "a")
+				min.send_keys(filters["price"].split('-')[0])
+				max.send_keys(Keys.CONTROL + "a")
+				max.send_keys(filters["price"].split('-')[1])
+
+				try:
+					self.driver.find_element(By.XPATH, "//button[contains(text(),\"products\")]").click()
+				except NoSuchElementException:
+					self.driver.find_element(By.XPATH, "//button[contains(text(),\"Close\")]").click()
+
+				filters.pop("price")
+			except ValueError:
+				pass
 
 		for k in filters:
-			nav = WebDriverWait(self.driver, WAIT_TIMEOUT) \
-				.until(
-					EC.visibility_of_element_located((
-						By.CSS_SELECTOR, 
-						"div[role=\"navigation\"]"
-					))
-				)
-			
 			# collect all filters
-			filter_buttons = nav.find_elements(By.CSS_SELECTOR, "div > div > button > div > div:nth-child(1)")[:-1] # Exclude last, which is the "Fewer filters" button
-			filter_keys = list(map(lambda elem: elem.text.lower(), filter_buttons))
-
+			# print(k)
+			filter_buttons, filter_keys = self.collect_filter_buttons()
+	
 			try:
 				j = filter_keys.index(k) # Index of our applicable filter
 			
 				filter_buttons[j].click() # Click on filter button to select value
-
-				if k == "price":
-					# Wait until the selection menu opens
-					WebDriverWait(self.driver, WAIT_TIMEOUT) \
-						.until(
-							EC.visibility_of_element_located((
-								By.CSS_SELECTOR,
-								"input[inputmode=\"decimal\"]"
-							))
-						)
-
-					min, max = self.driver.find_elements(By.CSS_SELECTOR, "input[inputmode=\"decimal\"]")
-
-					min.send_keys(Keys.CONTROL + "a")
-					min.send_keys(str(filters[k][0]))
-					max.send_keys(Keys.CONTROL + "a")
-					max.send_keys(str(filters[k][1]))
-
-					try:
-						self.driver.find_element(By.XPATH, "//button[contains(text(),\"products\")]").click()
-					except NoSuchElementException:
-						self.driver.find_element(By.XPATH, "//button[contains(text(),\"Close\")]").click()
-					continue
 
 				# Wait until the selection menu opens
 				filter_table = WebDriverWait(self.driver, WAIT_TIMEOUT) \
@@ -120,12 +197,14 @@ class Watcher:
 					)
 
 				filter_table_boxes = filter_table.find_elements(By.CSS_SELECTOR, "div[role=\"checkbox\"]")
-				filter_table_boxes_values = map(lambda b: b.get_attribute("title".lower()), filter_table_boxes)
-				
+				filter_table_boxes_values = list(map(lambda b: b.get_attribute("title").lower(), filter_table_boxes))
+
 				for i, value in enumerate(filters[k]):
-					if value in filter_table_boxes_values:
-						filter_table_boxes[i].click()
-					else:
+					try:
+						filter_table_boxes[filter_table_boxes_values.index(value)].click()
+					except ValueError:
+						# print("{} not available".format(value))
+						filter_table.find_element(By.CSS_SELECTOR, "button[title=\"Close\"]").click()
 						raise UnavailableFilterChoice
 
 				# for box in filter_table_boxes:
@@ -134,7 +213,129 @@ class Watcher:
 				
 				filter_table.find_element(By.CSS_SELECTOR, "button[title=\"Close\"]").click()
 			except ValueError:
+				# print("{} not applicable...".format(k))
 				pass # The provided filter is simply not applicable
+
+	def watch(self, watchlist="watchlist.json", pushover_creds=None, take=20):
+		watchlist = json.load(open(watchlist))
+		urls = []
+		last_len = len(urls)
+		last_update_time = datetime.time()
+		pushover_conn = HTTPSConnection("api.pushover.net:443") if pushover_creds is not None else None
+
+		web_serv = flask.Flask("GalaxusWatcher")
+
+		@web_serv.route("/hello/")
+		def hello():
+			return """<!DOCTYPE html>
+<html>
+<body>
+
+<h2>An Unordered HTML List</h2>
+
+<ul>
+  <li>Coffee</li>
+  <li>Tea</li>
+  <li>Milk</li>
+</ul>  
+
+<h2>An Ordered HTML List</h2>
+
+<ol>
+  <li>Coffee</li>
+  <li>Tea</li>
+  <li>Milk</li>
+</ol> 
+
+</body>
+</html>
+"""
+
+		@web_serv.route("/")
+		def show_urls():
+			page = """<head>
+	<link rel="stylesheet" href="static/style.css">
+	<meta http-equiv="refresh" content="60">
+</head><body><table> <tr> <th>Products</th> <th>Price</th> <th>Collection</th> </tr>
+			"""
+			for u in urls:
+				# print(u["name"])
+				try:
+					page += "<tr> <td> <a href={}>{}</a> </td> <td> {} </td> <td>{}</td> </tr>".format(u["href"], u["name"], u["price"], "Unavailable" if "collection not available" in u["availability"]["collection"] else "Available")
+				except KeyError:
+					print(u)
+			page += "</table>"
+			page += "<p>Last updated at {}</p>".format(last_update_time.strftime("%H:%M:%S"))
+			page += "</body>"
+			return page
+
+		@web_serv.route("/staiic/<path:path>")
+		def serve_static(path):
+			return flask.send_from_directory("static", path)
+
+
+		f = threading.Thread(target=web_serv.run, kwargs={"host": "0.0.0.0", "port": 443, "ssl_context": "adhoc"})
+		f.setDaemon(True)
+		f.start()
+		
+		init = False
+		while True:
+			for item in watchlist:
+				last_update_time = datetime.datetime.now()
+				new_urls = self.search(item["term"], item["filters"], take=take)
+				future_urls = []
+				for nu in new_urls:
+					if not nu in urls:
+						message = "New product available: {}, {}".format(nu["name"], nu["price"])
+						future_urls.append(nu)
+						
+						print(message)
+						if pushover_conn is not None and init: # The do not spam the user on init
+							pushover_conn.request("POST", "/1/messages.json",
+								urllib.parse.urlencode({
+									"token": pushover_creds["token"],
+									"user": pushover_creds["user"],
+									"title": "GalaxusWatcher",
+									"message": message,
+									"url_title": "Product link",
+									"url": nu["href"]
+								})
+							)
+							res = pushover_conn.getresponse()
+							if not res.status == 200:
+								print("Failed to push notification", bs.BeautifulSoup(res.read()).beautify())
+							else:
+								res.read()
+				
+				if pushover_conn is not None and not init:
+					pushover_conn.request("POST", "/1/messages.json",
+						urllib.parse.urlencode({
+							"token": pushover_creds["token"],
+							"user": pushover_creds["user"],
+							"title": "GalaxusWatcher",
+							"message": "Products available: {}".format(len(future_urls)),
+						})
+					)
+					res = pushover_conn.getresponse()
+					if not res.status == 200:
+						print("Failed to push notification", bs.BeautifulSoup(res.read()).beautify())
+					else:
+						res.read()
+
+				urls += future_urls
+				init = True
+
+				for u in urls:
+					if not u in new_urls:
+						print("A product has disappeared: {}, {}".format(u["name"], u["price"]))
+						urls.remove(u)
+
+
+			if not len(urls) == last_len:
+				last_len = len(urls)
+				print("Currenty {} products available".format(last_len))
+				
+			sleep(60)
 
 
 	def close(self):

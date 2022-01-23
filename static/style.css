@@ -1,0 +1,7 @@
+table, td, tr {
+	border: solid 3px black;
+}
+
+a {
+	text-decoration: none;
+}

@@ -5,6 +5,9 @@ name = "pypi"
 
 [packages]
 selenium = "*"
+flask = "*"
+certifi = "*"
+beautifulsoup4 = "*"
 
 [dev-packages]
 
