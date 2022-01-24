@@ -282,6 +282,7 @@ class Watcher:
 		while True:
 			for item in watchlist:
 				last_update_time = datetime.datetime.now()
+				print("Last updated at {}".format(last_update_time.strftime("%H:%M:%S")))
 				new_urls = self.search(item["term"], item["filters"], take=take)
 				future_urls = []
 				for nu in new_urls:
