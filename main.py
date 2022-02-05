@@ -1,4 +1,3 @@
-from unicodedata import category
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.service import Service
@@ -25,23 +24,29 @@ s = Service(executable_path="chrome_win.exe")
 
 
 creds = json.load(open("creds.json"))
+# creds = None
+
+galaxus_creds = json.load(open("galaxus_creds.json"))
 
 while True:
 	try:
 		driver = webdriver.Chrome(service=s, options=o)
 		watcher = util.Watcher(driver)
-		watcher.watch(pushover_creds=creds)
+		watcher.watch(pushover_creds=creds, delay=60)
 	except KeyboardInterrupt:
 		exit()
-	except:
-		print("Error occured, restarting")
+	except Exception as e:
+		print("Error occured, {}, restarting now...".format(e))
 		pushover_conn = HTTPSConnection("api.pushover.net:443")
 		pushover_conn.request("POST", "/1/messages.json",
 			urllib.parse.urlencode({
 				"token": creds["token"],
 				"user": creds["user"],
 				"title": "GalaxusWatcher",
-				"message": "Error occured, restarting"
+				"message": "Error occured, restarting",
+				"priority": 2,
+				"retry": 30,
+				"expire": 300
 			})
 		)
 		res = pushover_conn.getresponse().read()

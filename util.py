@@ -8,6 +8,8 @@ import urllib
 import threading
 import datetime
 import json
+import webbrowser
+import winsound
 
 import flask
 
@@ -33,6 +35,7 @@ class Watcher:
 	def __init__(self, driver):
 		self.base_url = "https://www.galaxus.ch/"
 		self.language = "en/"
+		self.checkout = "checkout/"
 		self.driver = driver
 
 	def search(self, term: str, filters: dict, take=20) -> List[dict]:
@@ -81,8 +84,6 @@ class Watcher:
 
 			options_names = popup.find_elements(By.XPATH, "./div[2]/h3")
 			option_texts = popup.find_elements(By.XPATH, "./div[2]/span/div")
-			# print("Options names: {}".format(len(options_names)))
-			# print("Options values: {}".format(len(option_texts)))
 
 			if len(option_texts) < len(options_names):
 				option_texts.append(None)
@@ -102,7 +103,9 @@ class Watcher:
 				"price": product.find_element(By.CSS_SELECTOR, "span > strong").text,
 				"availability": delivery_options
 			}
-		return list(map(mapf, self.driver.find_elements(By.CSS_SELECTOR, ".panelProduct")))
+		
+		products = self.driver.find_elements(By.CSS_SELECTOR, ".panelProduct")
+		return list(map(mapf, products))
 
 	def collect_filter_buttons(self):
 		# Expand all filters
@@ -216,7 +219,7 @@ class Watcher:
 				# print("{} not applicable...".format(k))
 				pass # The provided filter is simply not applicable
 
-	def watch(self, watchlist="watchlist.json", pushover_creds=None, take=20):
+	def watch(self, watchlist="watchlist.json", pushover_creds=None, take=20, delay=60):
 		watchlist = json.load(open(watchlist))
 		urls = []
 		last_len = len(urls)
@@ -261,7 +264,15 @@ class Watcher:
 			for u in urls:
 				# print(u["name"])
 				try:
-					page += "<tr> <td> <a href={}>{}</a> </td> <td> {} </td> <td>{}</td> </tr>".format(u["href"], u["name"], u["price"], "Unavailable" if "collection not available" in u["availability"]["collection"] else "Available")
+					collection_status = None
+					if "collection" in u["availability"]:
+						collection_status = "Unavailable" if "collection not available" in u["availability"]["collection"] else "Available"
+					elif "shipping / collection" in u["availability"]:
+						collection_status = "Available"
+					else:
+						collection_status = "Unavailable"
+
+					page += "<tr> <td> <a href={}>{}</a> </td> <td> {} </td> <td>{}</td> </tr>".format(u["href"], u["name"], u["price"], collection_status)
 				except KeyError:
 					print(u)
 			page += "</table>"
@@ -287,41 +298,31 @@ class Watcher:
 				future_urls = []
 				for nu in new_urls:
 					if not nu in urls:
+						webbrowser.open(nu["href"])
 						message = "New product available: {}, {}".format(nu["name"], nu["price"])
 						future_urls.append(nu)
 						
 						print(message)
-						if pushover_conn is not None and init: # The do not spam the user on init
-							pushover_conn.request("POST", "/1/messages.json",
-								urllib.parse.urlencode({
-									"token": pushover_creds["token"],
-									"user": pushover_creds["user"],
-									"title": "GalaxusWatcher",
-									"message": message,
-									"url_title": "Product link",
-									"url": nu["href"]
-								})
-							)
-							res = pushover_conn.getresponse()
-							if not res.status == 200:
-								print("Failed to push notification", bs.BeautifulSoup(res.read()).beautify())
-							else:
-								res.read()
+						if (pushover_conn is not None) and init: # To do not spam the user on init
+							self.alert(pushover_conn, pushover_creds, {
+								"token": pushover_creds["token"],
+								"user": pushover_creds["user"],
+								"title": "GalaxusWatcher",
+								"message": message,
+								"url_title": "Product link",
+								"url": nu["href"],
+								"priority": 2,
+								"retry": 30,
+								"expire": 300
+							}, beep=True)
 				
 				if pushover_conn is not None and not init:
-					pushover_conn.request("POST", "/1/messages.json",
-						urllib.parse.urlencode({
-							"token": pushover_creds["token"],
-							"user": pushover_creds["user"],
-							"title": "GalaxusWatcher",
-							"message": "Products available: {}".format(len(future_urls)),
-						})
-					)
-					res = pushover_conn.getresponse()
-					if not res.status == 200:
-						print("Failed to push notification", bs.BeautifulSoup(res.read()).beautify())
-					else:
-						res.read()
+					self.alert(pushover_conn, pushover_creds, {
+						"token": pushover_creds["token"],
+						"user": pushover_creds["user"],
+						"title": "GalaxusWatcher",
+						"message": "Products available: {}".format(len(future_urls)),
+					})
 
 				urls += future_urls
 				init = True
@@ -335,9 +336,118 @@ class Watcher:
 			if not len(urls) == last_len:
 				last_len = len(urls)
 				print("Currenty {} products available".format(last_len))
-				
-			sleep(60)
+			
+			remaining = delay - (datetime.datetime.now() - last_update_time).total_seconds()
+			if remaining > 0:
+				sleep(remaining)
 
+	def login(self, creds):
+		self.driver.get("https://id.digitecgalaxus.ch/login")
+
+		email = WebDriverWait(self.driver, WAIT_TIMEOUT) \
+			.until(
+				EC.presence_of_element_located((
+					By.CSS_SELECTOR,
+					"input[type=\"email\"]"
+				))
+			)
+
+		password = self.driver.find_element(By.CSS_SELECTOR, "input[type=\"password\"]")
+		login_button = self.driver.find_element(By.CSS_SELECTOR, "button[value=\"login\"]")
+		
+		ac = ActionChains(self.driver)
+		ac.move_to_element(email)
+		ac.click()
+		ac.pause(1)
+		for c in creds["email"]:
+			ac.send_keys(c)
+			ac.pause(0.5)
+		ac.pause(1)
+		ac.move_to_element(password)
+		ac.click()
+		ac.pause(1)
+		for c in creds["password"]:
+			ac.send_keys(c)
+			ac.pause(0.5)
+		ac.pause(1)
+		ac.move_to_element(login_button)
+		ac.pause(1)
+		ac.click()
+
+		ac.perform()
+
+	def purchase(self, url, creds):
+		self.driver.get(url)
+
+		add_to_basket_button = WebDriverWait(self.driver, WAIT_TIMEOUT) \
+			.until(
+				EC.presence_of_element_located((
+					By.CSS_SELECTOR,
+					"button[id=\"addToCartButton\"]"
+				))
+			)
+
+		add_to_basket_button.click()
+
+		WebDriverWait(self.driver, WAIT_TIMEOUT) \
+			.until(
+				EC.presence_of_element_located((
+					By.CSS_SELECTOR,
+					"div[data-test=\"upsellingContentHeader\"]"
+				))
+			)
+		
+		self.driver.get(self.base_url + self.language + self.checkout)
+
+		email = WebDriverWait(self.driver, WAIT_TIMEOUT) \
+			.until(
+				EC.presence_of_element_located((
+					By.CSS_SELECTOR,
+					"input[type=\"email\"]"
+				))
+			)
+
+		password = self.driver.find_element(By.CSS_SELECTOR, "input[type=\"password\"]")
+		login_button = self.driver.find_element(By.CSS_SELECTOR, "button[value=\"login\"]")
+		
+		ac = ActionChains(self.driver)
+		ac.move_to_element(email)
+		ac.click()
+		ac.pause(1)
+		for c in creds["email"]:
+			ac.send_keys(c)
+			ac.pause(0.5)
+		ac.pause(1)
+		ac.move_to_element(password)
+		ac.click()
+		ac.pause(1)
+		for c in creds["password"]:
+			ac.send_keys(c)
+			ac.pause(0.5)
+		ac.pause(1)
+		ac.move_to_element(login_button)
+		ac.pause(1)
+		ac.click()
+
+		ac.perform()
+
+	def alert(self, conn, creds, msg, beep=False):
+		if beep:
+			def beep():
+				for i in range(5):
+					winsound.Beep(1000, 500)
+
+			thread = threading.Thread(target=beep)
+			thread.start()
+
+		conn.request("POST", "/1/messages.json",
+			urllib.parse.urlencode(msg)
+		)
+		res = conn.getresponse()
+		if not res.status == 200:
+			print("Failed to push notification", bs.BeautifulSoup(res.read()).beautify())
+		else:
+			res.read()
 
 	def close(self):
 		self.driver.close()
